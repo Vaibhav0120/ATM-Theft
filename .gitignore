@@ -42,3 +42,7 @@ logs/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints
+training/cuda-keyring_1.1-1_all.deb
+training/yolo11n.pt
+training/yolov8n.pt
+training/calibration_image_sample_data_20x128x128x3_float32.npy
