@@ -1,0 +1,16 @@
+# This file is used by training/train_detector.py
+# It points to the dataset that was remapped by remap_detector_labels.py
+
+# --- IMPORTANT ---
+# This path must be the full, absolute path to the dataset folder
+# Or, you can just replace 'ATM-Theft-Detection-4' with the name
+# of the folder downloaded by setup.py (e.g., 'ATM-Theft-Detection-4')
+
+path: ../ATM-Theft-Detection-4  # Adjust this to point to the downloaded dataset
+train: train/images
+val: valid/images
+test: test/images
+
+# Class Info (Remapped to a single class)
+nc: 1
+names: ['face']

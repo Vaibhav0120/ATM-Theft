@@ -1,0 +1,6 @@
+roboflow
+ultralytics
+tensorflow
+opencv-python-headless
+tqdm
+Pillow

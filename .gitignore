@@ -1,0 +1,44 @@
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# --- Project-Specific ---
+
+# Downloaded Roboflow Dataset (DO NOT COMMIT)
+# This folder is downloaded by setup.py
+ATM-Theft-Detection-4/
+
+# Generated Classifier Data (DO NOT COMMIT)
+# This folder is created by prepare_classifier_data.py
+dataset_configs/classifier_data/
+
+# Trained Models & Checkpoints (Binary files, do not commit)
+# Use cloud storage (like S3, GDrive) or Git LFS for final models
+models/*.pt
+models/*.h5
+models/*.tflite
+models/*.onnx
+
+# Ultralytics & TensorFlow Training Artifacts
+runs/
+logs/
+*.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
