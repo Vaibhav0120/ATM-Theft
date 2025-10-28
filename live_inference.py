@@ -1,12 +1,12 @@
 """
-Test INT8 TFLite models on Windows CPU
-No GPU required - perfect for testing before Raspberry Pi deployment!
+Fixed ATM Security System - INT8 TFLite Inference
+Handles both FLOAT32 and UINT8 models automatically
 
-SETUP:
-1. Using Python 3.11
-2. pip install tensorflow opencv-python numpy
-3. Run: python live_inference.py
-
+CRITICAL FIX:
+- Auto-detects input/output types for both models
+- Classifier output interpretation corrected
+- Improved preprocessing
+- Better error handling
 """
 
 import os
@@ -21,18 +21,21 @@ CLASSIFIER_MODEL_PATH = 'models/classifier_int8.tflite'
 DETECTOR_IMG_SIZE = (320, 320)
 CLASSIFIER_IMG_SIZE = (224, 224)
 
-DETECTION_THRESHOLD = 0.5
-CLASSIFIER_THRESHOLD = 0.7
+DETECTION_THRESHOLD = 0.4  # Lowered slightly for better face detection
+CLASSIFIER_THRESHOLD = 0.6  # Adjusted for better classification
 
-CAM_SOURCE = 0  # Change to 1 if your camera doesn't work
+CAM_SOURCE = 0
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 
+# CRITICAL: This must match your training folder structure (alphabetically sorted)
+# covered/ comes before uncovered/ alphabetically
+# So: Class 0 = COVERED, Class 1 = UNCOVERED
 CLASSIFIER_CLASSES = {0: "COVERED", 1: "UNCOVERED"}
 # ===== End Configuration =====
 
 def load_tflite_model(model_path):
-    """Load TFLite model on CPU"""
+    """Load TFLite model with detailed information"""
     import tensorflow as tf
     
     if not os.path.exists(model_path):
@@ -40,7 +43,6 @@ def load_tflite_model(model_path):
         return None, None, None
     
     try:
-        # Load model (runs on CPU by default)
         interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
         
@@ -49,73 +51,89 @@ def load_tflite_model(model_path):
         
         model_name = os.path.basename(model_path)
         print(f"✅ Loaded: {model_name}")
-        print(f"   Input: {input_details[0]['shape']} ({input_details[0]['dtype'].__name__})")
-        print(f"   Output: {output_details[0]['shape']} ({output_details[0]['dtype'].__name__})")
+        
+        # Print input/output details
+        input_dtype = input_details[0]['dtype']
+        output_dtype = output_details[0]['dtype']
+        print(f"   Input:  {input_details[0]['shape']} - {input_dtype.__name__}")
+        print(f"   Output: {output_details[0]['shape']} - {output_dtype.__name__}")
+        
+        # Print quantization parameters
+        quant_params = output_details[0].get('quantization_parameters', {})
+        if 'scales' in quant_params and len(quant_params['scales']) > 0:
+            scale = quant_params['scales'][0]
+            zero_point = quant_params['zero_points'][0] if len(quant_params['zero_points']) > 0 else 0
+            print(f"   Output quantization: scale={scale:.6f}, zero_point={zero_point}")
         
         return interpreter, input_details, output_details
     except Exception as e:
         print(f"❌ Error loading {model_path}: {e}")
         return None, None, None
 
-def preprocess_for_detector(image, target_size, input_dtype):
-    """Preprocess image for YOLO detector"""
+def preprocess_image(image, target_size, input_dtype, letterbox=True):
+    """
+    Preprocess image for TFLite inference
+    Automatically handles FLOAT32 or UINT8 input types
+    """
     h, w = image.shape[:2]
     th, tw = target_size
     
-    # Letterbox resize (keeps aspect ratio)
-    scale = min(tw / w, th / h)
-    nw, nh = int(scale * w), int(scale * h)
-    
-    resized = cv2.resize(image, (nw, nh))
-    padded = np.full((th, tw, 3), 114, dtype=np.uint8)
-    
-    dw, dh = (tw - nw) // 2, (th - nh) // 2
-    padded[dh:dh+nh, dw:dw+nw, :] = resized
+    if letterbox:
+        # Letterbox resize (maintains aspect ratio with padding)
+        scale = min(tw / w, th / h)
+        nw, nh = int(scale * w), int(scale * h)
+        
+        resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        
+        # Create padded image (gray padding)
+        padded = np.full((th, tw, 3), 114, dtype=np.uint8)
+        dw, dh = (tw - nw) // 2, (th - nh) // 2
+        padded[dh:dh+nh, dw:dw+nw, :] = resized
+        
+        processed = padded
+    else:
+        # Simple resize (for classifier)
+        processed = cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
     
     # Convert BGR to RGB
-    rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
     
-    # For UINT8 quantized model, keep as uint8
-    if input_dtype == np.uint8:
-        return np.expand_dims(rgb, axis=0).astype(np.uint8)
-    else:
-        # For float32 models
+    # Handle different input types
+    if input_dtype == np.float32:
+        # For FLOAT32 models: normalize to 0-1 range
         normalized = rgb.astype(np.float32) / 255.0
         return np.expand_dims(normalized, axis=0)
-
-def preprocess_for_classifier(image, target_size, input_dtype):
-    """Preprocess image for MobileNetV2 classifier"""
-    # Resize
-    resized = cv2.resize(image, target_size)
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-    
-    # For UINT8 quantized model, keep as uint8
-    if input_dtype == np.uint8:
-        return np.expand_dims(rgb, axis=0).astype(np.uint8)
     else:
-        # MobileNetV2 preprocessing for float32
-        normalized = (rgb.astype(np.float32) / 127.5) - 1.0
-        return np.expand_dims(normalized, axis=0)
+        # For UINT8 models: keep as uint8
+        return np.expand_dims(rgb, axis=0).astype(np.uint8)
 
-def dequantize_output(output, output_details):
-    """Dequantize INT8/UINT8 output to float"""
-    dtype = output_details[0]['dtype']
+def dequantize_value(quantized_value, scale, zero_point):
+    """Dequantize INT8/UINT8 value to float"""
+    if scale == 0:
+        # No quantization or invalid params
+        return float(quantized_value) / 255.0
+    return scale * (float(quantized_value) - zero_point)
+
+def dequantize_tensor(tensor, output_details):
+    """Dequantize tensor if needed"""
+    quant_params = output_details[0].get('quantization_parameters', {})
     
-    if dtype in [np.int8, np.uint8]:
-        scale, zero_point = output_details[0]['quantization']
-        if scale != 0:  # Valid quantization params
-            return scale * (output.astype(np.float32) - zero_point)
+    if 'scales' in quant_params and len(quant_params['scales']) > 0:
+        scale = quant_params['scales'][0]
+        zero_point = quant_params['zero_points'][0] if len(quant_params['zero_points']) > 0 else 0
+        if scale != 0:
+            return scale * (tensor.astype(np.float32) - zero_point)
     
-    return output
+    return tensor.astype(np.float32)
 
 def detect_faces(interpreter, input_details, output_details, frame):
-    """Run face detection"""
+    """Run face detection with automatic type handling"""
     input_index = input_details[0]['index']
     output_index = output_details[0]['index']
     input_dtype = input_details[0]['dtype']
     
-    # Preprocess
-    input_tensor = preprocess_for_detector(frame, DETECTOR_IMG_SIZE, input_dtype)
+    # Preprocess with letterbox resize
+    input_tensor = preprocess_image(frame, DETECTOR_IMG_SIZE, input_dtype, letterbox=True)
     
     # Run inference
     interpreter.set_tensor(input_index, input_tensor)
@@ -123,13 +141,13 @@ def detect_faces(interpreter, input_details, output_details, frame):
     
     # Get output and dequantize if needed
     output = interpreter.get_tensor(output_index)
-    output = dequantize_output(output, output_details)
+    output = dequantize_tensor(output, output_details)
     
     # Process detections
     faces = []
     h, w = frame.shape[:2]
     
-    # YOLO output: [1, num_predictions, 5+num_classes]
+    # YOLO output format: [1, num_predictions, 5+num_classes]
     # For single class: [cx, cy, w, h, confidence]
     predictions = output[0].T
     
@@ -139,74 +157,99 @@ def detect_faces(interpreter, input_details, output_details, frame):
         if confidence >= DETECTION_THRESHOLD:
             cx, cy, bw, bh = pred[0:4]
             
-            # Convert to pixel coordinates
+            # Convert normalized coords to pixels
             x_min = int((cx - bw / 2) * w)
             y_min = int((cy - bh / 2) * h)
             x_max = int((cx + bw / 2) * w)
             y_max = int((cy + bh / 2) * h)
             
             # Clamp to image boundaries
-            x_min = max(0, min(x_min, w))
-            y_min = max(0, min(y_min, h))
+            x_min = max(0, min(x_min, w - 1))
+            y_min = max(0, min(y_min, h - 1))
             x_max = max(0, min(x_max, w))
             y_max = max(0, min(y_max, h))
             
+            # Validate box dimensions
             if x_max > x_min and y_max > y_min:
+                # Add padding to bounding box (helps classifier)
+                pad_w = int((x_max - x_min) * 0.1)
+                pad_h = int((y_max - y_min) * 0.1)
+                
+                x_min = max(0, x_min - pad_w)
+                y_min = max(0, y_min - pad_h)
+                x_max = min(w, x_max + pad_w)
+                y_max = min(h, y_max + pad_h)
+                
                 faces.append(((x_min, y_min, x_max, y_max), float(confidence)))
     
     return faces
 
 def classify_face(interpreter, input_details, output_details, face_crop):
-    """Classify if face is covered or uncovered"""
+    """
+    Classify if face is covered or uncovered
+    
+    CRITICAL FIX: Proper interpretation of binary classifier output
+    - Model trained with folders: covered/ (0) and uncovered/ (1)
+    - Sigmoid output: low values → class 0 (covered), high values → class 1 (uncovered)
+    """
     input_index = input_details[0]['index']
     output_index = output_details[0]['index']
     input_dtype = input_details[0]['dtype']
+    output_dtype = output_details[0]['dtype']
     
-    # Preprocess
-    input_tensor = preprocess_for_classifier(face_crop, CLASSIFIER_IMG_SIZE, input_dtype)
+    # Preprocess (no letterbox for classifier)
+    input_tensor = preprocess_image(face_crop, CLASSIFIER_IMG_SIZE, input_dtype, letterbox=False)
     
     # Run inference
     interpreter.set_tensor(input_index, input_tensor)
     interpreter.invoke()
     
-    # Get raw UINT8 output (e.g., a value from 0 to 255)
+    # Get raw output
     output_raw = interpreter.get_tensor(output_index)
-    pred_score_uint8 = int(output_raw[0][0])
     
-    # --- This is the new logic ---
-    # We scale the 0.0-1.0 threshold to the 0-255 uint8 range
-    uint8_threshold = int(CLASSIFIER_THRESHOLD * 255)
-    
-    # Dequantize the score just for display/logging
-    # 0 -> 0.0, 255 -> 1.0
-    prob_uncovered = pred_score_uint8 / 255.0
-    
-    if pred_score_uint8 >= uint8_threshold:
-        # Class 1: Uncovered
-        return 1, prob_uncovered
+    # Handle different output types
+    if output_dtype == np.uint8 or output_dtype == np.int8:
+        # Quantized output - need to dequantize
+        pred_score_quantized = int(output_raw[0][0])
+        
+        # Get quantization parameters
+        quant_params = output_details[0].get('quantization_parameters', {})
+        if 'scales' in quant_params and len(quant_params['scales']) > 0:
+            scale = quant_params['scales'][0]
+            zero_point = quant_params['zero_points'][0] if len(quant_params['zero_points']) > 0 else 0
+            # Dequantize to get actual probability
+            prob_class_1 = dequantize_value(pred_score_quantized, scale, zero_point)
+        else:
+            # Fallback: simple normalization
+            prob_class_1 = pred_score_quantized / 255.0
     else:
-        # Class 0: Covered
-        # For "covered" (class 0), we report the probability of it being covered
-        prob_covered = 1.0 - prob_uncovered
-        return 0, prob_covered
+        # FLOAT32 output - already dequantized
+        prob_class_1 = float(output_raw[0][0])
+    
+    # Clamp probability to valid range
+    prob_class_1 = np.clip(prob_class_1, 0.0, 1.0)
+    prob_class_0 = 1.0 - prob_class_1
+    
+    # Determine class based on threshold
+    # Higher probability of class 1 (uncovered) → classify as uncovered
+    if prob_class_1 >= CLASSIFIER_THRESHOLD:
+        return 1, prob_class_1  # UNCOVERED
+    else:
+        return 0, prob_class_0  # COVERED
 
 def main():
     print("=" * 70)
-    print("Testing INT8 TFLite Models on CPU")
-    print("(Same models for Raspberry Pi 5)")
+    print("ATM Security System - Face Coverage Detection")
+    print("FIXED VERSION - Auto-detects Model Types")
     print("=" * 70)
     
     # Check TensorFlow
     try:
         import tensorflow as tf
         print(f"\n✅ TensorFlow version: {tf.__version__}")
-        print("✅ Running on CPU (no GPU needed)")
     except ImportError:
         print("\n❌ TensorFlow not installed!")
-        print("\nInstall with:")
-        print("  pip install tensorflow")
-        print("  OR")
-        print("  pip install tensorflow==2.10.0")
+        print("Install with: pip install tensorflow")
         return
     
     # Load models
@@ -216,16 +259,11 @@ def main():
     
     detector, det_in, det_out = load_tflite_model(DETECTOR_MODEL_PATH)
     if detector is None:
-        print("\n❌ Detector model not found!")
-        print(f"Make sure '{DETECTOR_MODEL_PATH}' exists.")
-        print("Copy it from WSL2 or train it first.")
         return
     
     print()
     classifier, cls_in, cls_out = load_tflite_model(CLASSIFIER_MODEL_PATH)
     if classifier is None:
-        print("\n❌ Classifier model not found!")
-        print(f"Make sure '{CLASSIFIER_MODEL_PATH}' exists.")
         return
     
     # Open camera
@@ -233,23 +271,12 @@ def main():
     print("Opening Camera...")
     print("=" * 70)
     
-    print(f"Trying camera index: {CAM_SOURCE}")
     cap = cv2.VideoCapture(CAM_SOURCE)
-    time.sleep(2)  # Give camera time to initialize
+    time.sleep(2)
     
     if not cap.isOpened():
         print(f"❌ Cannot open camera {CAM_SOURCE}")
-        fallback = 1 if CAM_SOURCE == 0 else 0
-        print(f"Trying camera index: {fallback}")
-        cap = cv2.VideoCapture(fallback)
-        time.sleep(2)
-        
-        if not cap.isOpened():
-            print("❌ No camera available!")
-            print("\nTroubleshooting:")
-            print("- Check if another app is using the camera")
-            print("- Try different CAM_SOURCE values (0, 1, 2)")
-            return
+        return
     
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
@@ -257,16 +284,18 @@ def main():
     
     print("✅ Camera opened successfully!")
     print("\n" + "=" * 70)
-    print("Starting Live Inference on CPU")
+    print("Starting Live Detection")
     print("Press 'q' to quit")
     print("=" * 70 + "\n")
     
     # Performance tracking
-    frame_times = []
-    detect_times = []
-    classify_times = []
+    covered_count = 0
+    uncovered_count = 0
+    total_detections = 0
     
-    frame_count = 0
+    fps_start = time.time()
+    fps_count = 0
+    display_fps = 0
     
     while True:
         loop_start = time.time()
@@ -276,80 +305,108 @@ def main():
             time.sleep(0.01)
             continue
         
-        frame_count += 1
+        fps_count += 1
         
-        # Face detection
-        detect_start = time.time()
+        # Detect faces
         faces = detect_faces(detector, det_in, det_out, frame)
-        detect_ms = (time.time() - detect_start) * 1000
-        detect_times.append(detect_ms)
         
-        # Classification
+        # Classify each face
         warning = False
-        total_classify_ms = 0
+        frame_covered = 0
+        frame_uncovered = 0
         
         for (x1, y1, x2, y2), det_conf in faces:
+            # Validate crop dimensions
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
             crop = frame[y1:y2, x1:x2]
             
             if crop.size == 0:
                 continue
             
             # Classify
-            cls_start = time.time()
             class_id, prob = classify_face(classifier, cls_in, cls_out, crop)
-            cls_ms = (time.time() - cls_start) * 1000
-            total_classify_ms += cls_ms
-            
             label = CLASSIFIER_CLASSES[class_id]
-            color = (0, 0, 255) if class_id == 0 else (0, 255, 0)
             
+            # Update statistics
+            total_detections += 1
             if class_id == 0:
+                covered_count += 1
+                frame_covered += 1
+                color = (0, 0, 255)  # Red for covered
                 warning = True
+            else:
+                uncovered_count += 1
+                frame_uncovered += 1
+                color = (0, 255, 0)  # Green for uncovered
             
-            # Draw bounding box
+            # Draw bounding box and label
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, f"{label} {prob:.2f}", (x1, y1-10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            # Create label with probability
+            label_text = f"{label} {prob:.2f}"
+            
+            # Add background to text for readability
+            (text_width, text_height), baseline = cv2.getTextSize(
+                label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+            )
+            cv2.rectangle(frame, (x1, y1 - text_height - 10), 
+                         (x1 + text_width, y1), color, -1)
+            cv2.putText(frame, label_text, (x1, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Show detection confidence
+            det_text = f"Det: {det_conf:.2f}"
+            cv2.putText(frame, det_text, (x1, y2 + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
-        if total_classify_ms > 0:
-            classify_times.append(total_classify_ms)
-        
-        # Warning message
+        # Warning banner
         if warning:
-            cv2.putText(frame, "WARNING: FACE COVERED!", (10, FRAME_HEIGHT-40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            h, w = frame.shape[:2]
+            # Draw semi-transparent red overlay
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, h - 60), (w, h), (0, 0, 200), -1)
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+            
+            # Warning text
+            cv2.putText(frame, "WARNING: FACE COVERED DETECTED!", 
+                       (w // 2 - 250, h - 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            print(f"ALERT: Face covering detected! (Frame covered: {frame_covered})")
         
         # Calculate FPS
-        loop_time = time.time() - loop_start
-        frame_times.append(loop_time)
+        if time.time() - fps_start >= 1.0:
+            display_fps = fps_count / (time.time() - fps_start)
+            fps_count = 0
+            fps_start = time.time()
         
-        # Keep last 30 frames for averaging
-        if len(frame_times) > 30:
-            frame_times.pop(0)
-        if len(detect_times) > 30:
-            detect_times.pop(0)
-        if len(classify_times) > 30:
-            classify_times.pop(0)
+        # Display info panel
+        info_y = 30
+        cv2.putText(frame, f"FPS: {display_fps:.1f}", (10, info_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        avg_fps = 1.0 / (sum(frame_times) / len(frame_times))
-        avg_detect = sum(detect_times) / len(detect_times)
-        avg_classify = sum(classify_times) / len(classify_times) if classify_times else 0
-        
-        # Display stats
-        cv2.putText(frame, f"FPS: {avg_fps:.1f}", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"Detection: {avg_detect:.1f}ms", (10, 60),
+        cv2.putText(frame, f"Faces: {len(faces)}", (10, info_y + 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        if avg_classify > 0:
-            cv2.putText(frame, f"Classification: {avg_classify:.1f}ms", (10, 85),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        if total_detections > 0:
+            cv2.putText(frame, f"Covered: {covered_count} ({100*covered_count/total_detections:.1f}%)", 
+                       (10, info_y + 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            cv2.putText(frame, f"Uncovered: {uncovered_count} ({100*uncovered_count/total_detections:.1f}%)", 
+                       (10, info_y + 75),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         # Model info
-        cv2.putText(frame, "CPU Mode | INT8 TFLite", (10, FRAME_HEIGHT-10),
+        det_type = "FP32" if det_in[0]['dtype'] == np.float32 else "INT8" # type: ignore
+        cls_type = "FP32" if cls_in[0]['dtype'] == np.float32 else "INT8" # type: ignore
+        cv2.putText(frame, f"Detector: {det_type} | Classifier: {cls_type}", 
+                   (10, FRAME_HEIGHT - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
         # Show frame
-        cv2.imshow('TFLite Models Test (CPU)', frame)
+        cv2.imshow('ATM Security - Face Coverage Detection', frame)
         
         # Exit on 'q'
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -359,18 +416,15 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
     
-    # Final stats
+    # Final statistics
     print("\n" + "=" * 70)
     print("Session Summary")
     print("=" * 70)
-    print(f"Total frames processed: {frame_count}")
-    print(f"Average FPS: {avg_fps:.1f}")
-    print(f"Average Detection Time: {avg_detect:.1f}ms")
-    if avg_classify > 0:
-        print(f"Average Classification Time: {avg_classify:.1f}ms")
-    print(f"Total inference time per frame: {avg_detect + avg_classify:.1f}ms")
-    print("\n✅ Models tested successfully on CPU!")
-    print("Performance on Raspberry Pi 5 will be similar (5-15 FPS expected)")
+    print(f"Total detections: {total_detections}")
+    if total_detections > 0:
+        print(f"Covered faces: {covered_count} ({100*covered_count/total_detections:.1f}%)")
+        print(f"Uncovered faces: {uncovered_count} ({100*uncovered_count/total_detections:.1f}%)")
+    print(f"Average FPS: {display_fps:.1f}")
     print("=" * 70)
 
 if __name__ == '__main__':
