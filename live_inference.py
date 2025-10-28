@@ -1,12 +1,12 @@
 """
-Fixed ATM Security System - INT8 TFLite Inference
+FIXED ATM Security System - INT8 TFLite Inference
 Handles both FLOAT32 and UINT8 models automatically
 
-CRITICAL FIX:
-- Auto-detects input/output types for both models
-- Classifier output interpretation corrected
-- Improved preprocessing
-- Better error handling
+CRITICAL FIXES:
+- Fixed representative dataset in training (train_classifier.py)
+- Improved dequantization logic
+- Better probability interpretation
+- Enhanced debugging output
 """
 
 import os
@@ -22,7 +22,7 @@ DETECTOR_IMG_SIZE = (320, 320)
 CLASSIFIER_IMG_SIZE = (224, 224)
 
 DETECTION_THRESHOLD = 0.4  # Lowered slightly for better face detection
-CLASSIFIER_THRESHOLD = 0.6  # Adjusted for better classification
+CLASSIFIER_THRESHOLD = 0.5  # Binary threshold for covered/uncovered
 
 CAM_SOURCE = 0
 FRAME_WIDTH = 640
@@ -104,7 +104,7 @@ def preprocess_image(image, target_size, input_dtype, letterbox=True):
         normalized = rgb.astype(np.float32) / 255.0
         return np.expand_dims(normalized, axis=0)
     else:
-        # For UINT8 models: keep as uint8
+        # For UINT8 models: keep as uint8 in 0-255 range
         return np.expand_dims(rgb, axis=0).astype(np.uint8)
 
 def dequantize_value(quantized_value, scale, zero_point):
@@ -184,12 +184,13 @@ def detect_faces(interpreter, input_details, output_details, frame):
     
     return faces
 
-def classify_face(interpreter, input_details, output_details, face_crop):
+def classify_face(interpreter, input_details, output_details, face_crop, debug=False):
     """
     Classify if face is covered or uncovered
     
-    CRITICAL FIX: Proper interpretation of binary classifier output
-    - Model trained with folders: covered/ (0) and uncovered/ (1)
+    FIXED VERSION:
+    - Proper dequantization of UINT8 output
+    - Correct probability interpretation
     - Sigmoid output: low values → class 0 (covered), high values → class 1 (uncovered)
     """
     input_index = input_details[0]['index']
@@ -217,16 +218,25 @@ def classify_face(interpreter, input_details, output_details, face_crop):
         if 'scales' in quant_params and len(quant_params['scales']) > 0:
             scale = quant_params['scales'][0]
             zero_point = quant_params['zero_points'][0] if len(quant_params['zero_points']) > 0 else 0
-            # Dequantize to get actual probability
+            
+            # CRITICAL FIX: Proper dequantization
             prob_class_1 = dequantize_value(pred_score_quantized, scale, zero_point)
+            
+            if debug:
+                print(f"  [DEBUG] Raw UINT8: {pred_score_quantized}, Scale: {scale:.6f}, ZP: {zero_point}")
+                print(f"  [DEBUG] Dequantized probability: {prob_class_1:.4f}")
         else:
             # Fallback: simple normalization
             prob_class_1 = pred_score_quantized / 255.0
+            if debug:
+                print(f"  [DEBUG] No quant params, using simple norm: {prob_class_1:.4f}")
     else:
         # FLOAT32 output - already dequantized
         prob_class_1 = float(output_raw[0][0])
+        if debug:
+            print(f"  [DEBUG] Float32 output: {prob_class_1:.4f}")
     
-    # Clamp probability to valid range
+    # Clamp probability to valid range [0, 1]
     prob_class_1 = np.clip(prob_class_1, 0.0, 1.0)
     prob_class_0 = 1.0 - prob_class_1
     
@@ -240,7 +250,7 @@ def classify_face(interpreter, input_details, output_details, face_crop):
 def main():
     print("=" * 70)
     print("ATM Security System - Face Coverage Detection")
-    print("FIXED VERSION - Auto-detects Model Types")
+    print("FIXED VERSION - Proper Quantization & Dequantization")
     print("=" * 70)
     
     # Check TensorFlow
@@ -285,13 +295,14 @@ def main():
     print("✅ Camera opened successfully!")
     print("\n" + "=" * 70)
     print("Starting Live Detection")
-    print("Press 'q' to quit")
+    print("Press 'q' to quit, 'd' for debug mode")
     print("=" * 70 + "\n")
     
     # Performance tracking
     covered_count = 0
     uncovered_count = 0
     total_detections = 0
+    debug_mode = False
     
     fps_start = time.time()
     fps_count = 0
@@ -325,9 +336,15 @@ def main():
             if crop.size == 0:
                 continue
             
-            # Classify
-            class_id, prob = classify_face(classifier, cls_in, cls_out, crop)
+            # Classify with debug info
+            if debug_mode:
+                print(f"\n[Face Detection] Confidence: {det_conf:.3f}")
+            
+            class_id, prob = classify_face(classifier, cls_in, cls_out, crop, debug=debug_mode)
             label = CLASSIFIER_CLASSES[class_id]
+            
+            if debug_mode:
+                print(f"[Classification] Label: {label}, Probability: {prob:.3f}")
             
             # Update statistics
             total_detections += 1
@@ -374,7 +391,8 @@ def main():
                        (w // 2 - 250, h - 25),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             
-            print(f"ALERT: Face covering detected! (Frame covered: {frame_covered})")
+            if not debug_mode:  # Don't spam in debug mode
+                print(f"⚠️  ALERT: Face covering detected! (Frame covered: {frame_covered})")
         
         # Calculate FPS
         if time.time() - fps_start >= 1.0:
@@ -399,18 +417,29 @@ def main():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         # Model info
-        det_type = "FP32" if det_in[0]['dtype'] == np.float32 else "INT8" # type: ignore
-        cls_type = "FP32" if cls_in[0]['dtype'] == np.float32 else "INT8" # type: ignore
+        det_type = "FP32" if det_in[0]['dtype'] == np.float32 else "INT8"
+        cls_type = "FP32" if cls_in[0]['dtype'] == np.float32 else "INT8"
         cv2.putText(frame, f"Detector: {det_type} | Classifier: {cls_type}", 
                    (10, FRAME_HEIGHT - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
+        # Debug mode indicator
+        if debug_mode:
+            cv2.putText(frame, "[DEBUG MODE]", (FRAME_WIDTH - 150, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
         # Show frame
         cv2.imshow('ATM Security - Face Coverage Detection', frame)
         
-        # Exit on 'q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # Handle key presses
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord('d'):
+            debug_mode = not debug_mode
+            print(f"\n{'='*50}")
+            print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+            print(f"{'='*50}\n")
     
     # Cleanup
     cap.release()

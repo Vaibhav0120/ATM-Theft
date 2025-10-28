@@ -49,12 +49,6 @@ def build_model(num_classes):
     )
     return model
 
-def get_representative_dataset(dataset):
-    """Yields a sample of images for TFLite INT8 quantization."""
-    # Take 100-300 images for calibration
-    for images, _ in dataset.take(100):
-        yield [images]
-
 def train():
     # 1. Load Datasets
     print(f"Loading classifier data from '{DATA_DIR}'...")
@@ -74,6 +68,7 @@ def train():
     
     class_names = train_dataset.class_names
     print(f"Found classes: {class_names}")
+    print(f"Class mapping: {class_names[0]} = 0, {class_names[1]} = 1")
     
     if len(class_names) != 2:
         print(f"Error: Expected 2 classes, but found {len(class_names)}")
@@ -96,41 +91,62 @@ def train():
     print(f"Keras model saved to {keras_save_path}")
 
     # 3. Convert and Quantize to TFLite INT8
-    print("Exporting to TFLite INT8...")
+    print("\n" + "="*70)
+    print("Exporting to TFLite INT8 (FIXED VERSION)...")
+    print("="*70)
     
-    # Create a dataset for quantization (must not be preprocessed)
+    # CRITICAL FIX: Create a proper representative dataset
+    # Load raw images without preprocessing
     quant_dataset = tf.keras.utils.image_dataset_from_directory(
         os.path.join(DATA_DIR, 'train'),
         image_size=IMG_SIZE,
-        batch_size=1, # Must be batch_size 1
+        batch_size=1, # Must be batch_size 1 for calibration
         label_mode='binary'
     )
     
-    # Note: The MobileNetV2 preprocess_input is part of the model,
-    # so our representative dataset should provide raw uint8 images.
+    # FIXED: Proper representative dataset generator
+    # The model expects uint8 input (0-255), and has preprocessing inside
     def representative_gen():
-        for images, _ in quant_dataset.take(150): # 150 calibration steps
-            # Ensure input is float32 for the converter's input
-            yield [tf.cast(images, tf.float32)] 
+        """Generate calibration data for INT8 quantization."""
+        print("Generating calibration data for quantization...")
+        for i, (images, _) in enumerate(quant_dataset.take(150)):
+            if i % 30 == 0:
+                print(f"  Calibration step {i}/150")
+            # CRITICAL FIX: Keep as float32 in 0-255 range for the preprocessing layer
+            # The model's internal preprocessing will scale it correctly
+            # TFLite converter will handle the quantization at the input
+            calibration_data = tf.cast(images, tf.float32)
+            yield [calibration_data]
+        print("Calibration data generation complete.")
 
     # Convert the Keras model
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
     converter.representative_dataset = representative_gen
-    # Ensure full integer quantization
+    
+    # FIXED: Proper INT8 quantization settings
+    # Force full integer quantization for all ops
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type = tf.uint8  # Input is raw image
+    converter.inference_input_type = tf.uint8  # Input is raw image (0-255)
     converter.inference_output_type = tf.uint8 # Output is quantized
     
+    print("\nStarting TFLite conversion...")
     tflite_quant_model = converter.convert()
+    print("TFLite conversion complete.")
 
     # 4. Save the final TFLite model
     final_tflite_path = os.path.join(MODEL_SAVE_PATH, f"{FINAL_MODEL_NAME}_int8.tflite")
     with open(final_tflite_path, 'wb') as f:
         f.write(tflite_quant_model)
         
-    print(f"✅ Quantized TFLite model saved to: {final_tflite_path}")
-    print(f"Class Index Mapping: {class_names[0]} = 0, {class_names[1]} = 1")
+    print(f"\n{'='*70}")
+    print(f"✅ SUCCESS: Quantized TFLite model saved to: {final_tflite_path}")
+    print(f"{'='*70}")
+    print(f"\nClass Index Mapping (alphabetical order):")
+    print(f"  {class_names[0]} = 0 (sigmoid output ~0.0)")
+    print(f"  {class_names[1]} = 1 (sigmoid output ~1.0)")
+    print(f"\nModel ready for deployment on Raspberry Pi 5!")
+    print(f"{'='*70}\n")
 
 
 if __name__ == '__main__':

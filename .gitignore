@@ -1,48 +1,72 @@
-# Python bytecode and cache
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Dataset folders (large, downloaded by setup.py)
+ATM-Theft-Detection-*/
 
-# Virtual Environments
-venv/
-.venv/
-env/
-.env
-
-# IDE / Editor configuration
-.vscode/
-.idea/
-
-# OS-specific files
-.DS_Store
-Thumbs.db
-
-# --- Project-Specific ---
-
-# Downloaded Roboflow Dataset (DO NOT COMMIT)
-# This folder is downloaded by setup.py
-ATM-Theft-Detection-4/
-
-# Generated Classifier Data (DO NOT COMMIT)
-# This folder is created by prepare_classifier_data.py
+# Generated data
 dataset_configs/classifier_data/
 
-# Trained Models & Checkpoints (Binary files, do not commit)
-# Use cloud storage (like S3, GDrive) or Git LFS for final models
-models/*.pt
-models/*.h5
-models/*.tflite
-models/*.onnx
+# Trained models
+models/
+*.h5
+*.pt
+*.tflite
+*.onnx
+*.pb
 
-# Ultralytics & TensorFlow Training Artifacts
+# Training outputs
 runs/
-logs/
+detector_train_run/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Logs
 *.log
 
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints
-training/cuda-keyring_1.1-1_all.deb
-training/yolo11n.pt
-training/yolov8n.pt
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# OS
+Thumbs.db
+.DS_Store
 training/calibration_image_sample_data_20x128x128x3_float32.npy
+training/cuda-keyring_1.1-1_all.deb
