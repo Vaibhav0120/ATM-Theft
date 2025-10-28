@@ -131,7 +131,7 @@ def detect_faces(interpreter, input_details, output_details, frame):
     
     # YOLO output: [1, num_predictions, 5+num_classes]
     # For single class: [cx, cy, w, h, confidence]
-    predictions = output[0]
+    predictions = output[0].T
     
     for pred in predictions:
         confidence = pred[4]
@@ -169,21 +169,26 @@ def classify_face(interpreter, input_details, output_details, face_crop):
     interpreter.set_tensor(input_index, input_tensor)
     interpreter.invoke()
     
-    # Get output and dequantize
-    output = interpreter.get_tensor(output_index)
-    output = dequantize_output(output, output_details)
+    # Get raw UINT8 output (e.g., a value from 0 to 255)
+    output_raw = interpreter.get_tensor(output_index)
+    pred_score_uint8 = int(output_raw[0][0])
     
-    # Binary classification
-    prob_uncovered = float(output[0][0])
+    # --- This is the new logic ---
+    # We scale the 0.0-1.0 threshold to the 0-255 uint8 range
+    uint8_threshold = int(CLASSIFIER_THRESHOLD * 255)
     
-    # Apply sigmoid if output is logit (not already probability)
-    if prob_uncovered < 0 or prob_uncovered > 1:
-        prob_uncovered = 1.0 / (1.0 + np.exp(-prob_uncovered))
+    # Dequantize the score just for display/logging
+    # 0 -> 0.0, 255 -> 1.0
+    prob_uncovered = pred_score_uint8 / 255.0
     
-    if prob_uncovered >= CLASSIFIER_THRESHOLD:
-        return 1, prob_uncovered  # Uncovered
+    if pred_score_uint8 >= uint8_threshold:
+        # Class 1: Uncovered
+        return 1, prob_uncovered
     else:
-        return 0, 1.0 - prob_uncovered  # Covered
+        # Class 0: Covered
+        # For "covered" (class 0), we report the probability of it being covered
+        prob_covered = 1.0 - prob_uncovered
+        return 0, prob_covered
 
 def main():
     print("=" * 70)
