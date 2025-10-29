@@ -417,8 +417,8 @@ def main():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         # Model info
-        det_type = "FP32" if det_in[0]['dtype'] == np.float32 else "INT8"
-        cls_type = "FP32" if cls_in[0]['dtype'] == np.float32 else "INT8"
+        det_type = "FP32" if det_in[0]['dtype'] == np.float32 else "INT8" # type: ignore
+        cls_type = "FP32" if cls_in[0]['dtype'] == np.float32 else "INT8" # type: ignore
         cv2.putText(frame, f"Detector: {det_type} | Classifier: {cls_type}", 
                    (10, FRAME_HEIGHT - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)

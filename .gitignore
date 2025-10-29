@@ -70,3 +70,4 @@ Thumbs.db
 .DS_Store
 training/calibration_image_sample_data_20x128x128x3_float32.npy
 training/cuda-keyring_1.1-1_all.deb
+.env

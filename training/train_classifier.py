@@ -8,7 +8,7 @@ MODEL_SAVE_PATH = os.path.join('..', 'models')
 FINAL_MODEL_NAME = 'classifier'
 IMG_SIZE = (224, 224) # MobileNetV2 preferred input size
 BATCH_SIZE = 32
-EPOCHS = 10
+EPOCHS = 25
 # --- End Config ---
 
 # Create save directory

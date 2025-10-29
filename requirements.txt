@@ -5,3 +5,4 @@ opencv-python-headless
 tqdm
 Pillow
 numpy<2.3.0
+python-dotenv
